@@ -80,7 +80,10 @@ int main()
 
     int startX = -1, startY = -1, resultX = -1, resultY = -1;
     bool selfFirstBlack = (turnID == 1 && currBotColor == grid_black);
+
+    // 严格遵照官方文档的防超时设计，设定 0.95 秒的阈值
     clock_t startTime = clock();
+    double timeThreshold = 0.95 * (double)CLOCKS_PER_SEC;
 
     if (selfFirstBlack) {
         // 黑方先手，只下一子，直接下在棋盘正中央
@@ -112,7 +115,6 @@ int main()
             // 整个棋盘的静态评估
             int evaluateBoard() {
                 int myScore = 0, opScore = 0;
-                // 遍历所有可能的连续6子窗口
                 for (int x = 0; x < GRIDSIZE; x++) {
                     for (int y = 0; y < GRIDSIZE; y++) {
                         for (int d = 0; d < 4; d++) {
@@ -131,11 +133,10 @@ int main()
                         }
                     }
                 }
-                // 防守权重略高，避免被偷鸡
                 return myScore - opScore * 2;
             }
 
-            // 评估在(x,y)落子的潜力（用于预排序筛选候选点）
+            // 评估在(x,y)落子的潜力
             int evalPointAdd(int x, int y, int color) {
                 int score = 0;
                 int oppColor = -color;
@@ -168,39 +169,35 @@ int main()
             struct Move { int x1, y1, x2, y2; };
 
             // Alpha-Beta 剪枝递归
-            int alphaBeta(int depth, int alpha, int beta, bool isMax, clock_t startT) {
-                // 卡时机制：运行时间接近0.9秒立即返回极大/极小值强制截断 [cite: 153, 155]
-                if (clock() - startT > 0.90 * CLOCKS_PER_SEC) {
+            int alphaBeta(int depth, int alpha, int beta, bool isMax, clock_t startT, double limitT) {
+                if ((double)(clock() - startT) > limitT) {
                     return isMax ? -100000000 : 100000000;
                 }
 
                 int score = evaluateBoard();
-                // 深度达到或者已经出现胜负局面则不再搜索
                 if (depth == 0 || std::abs(score) > 5000000) return score;
 
                 std::vector<PointInfo> pts;
                 for (int x = 0; x < GRIDSIZE; x++) {
                     for (int y = 0; y < GRIDSIZE; y++) {
-                        if (grid[x][y] == 0) {
+                        if (grid[x][y] == grid_blank) {
                             bool near = false;
-                            // 只考虑周围距离为2以内的点，修剪无效分支
                             for (int dx = -2; dx <= 2; dx++) {
                                 for (int dy = -2; dy <= 2; dy++) {
-                                    if (x + dx >= 0 && x + dx < GRIDSIZE && y + dy >= 0 && y + dy < GRIDSIZE && grid[x + dx][y + dy] != 0) {
+                                    if (x + dx >= 0 && x + dx < GRIDSIZE && y + dy >= 0 && y + dy < GRIDSIZE && grid[x + dx][y + dy] != grid_blank) {
                                         near = true; break;
                                     }
                                 }
                                 if (near) break;
                             }
                             if (near) {
-                                // 综合考虑该点的进攻与防守价值
                                 pts.push_back({ x, y, evalPointAdd(x,y,myC) + evalPointAdd(x,y,opC) });
                             }
                         }
                     }
                 }
                 std::sort(pts.begin(), pts.end());
-                int limit = 10; // 控制每一层的分支数量以保证性能
+                size_t limit = 10; // 已修复警告
                 if (pts.size() > limit) pts.resize(limit);
 
                 std::vector<Move> moves;
@@ -214,11 +211,11 @@ int main()
                     int maxEval = -1000000000;
                     for (Move m : moves) {
                         grid[m.x1][m.y1] = myC; grid[m.x2][m.y2] = myC;
-                        int eval = alphaBeta(depth - 1, alpha, beta, false, startT);
+                        int eval = alphaBeta(depth - 1, alpha, beta, false, startT, limitT);
                         grid[m.x1][m.y1] = 0; grid[m.x2][m.y2] = 0;
                         maxEval = std::max(maxEval, eval);
                         alpha = std::max(alpha, eval);
-                        if (beta <= alpha) break; // 剪枝
+                        if (beta <= alpha) break;
                     }
                     return maxEval;
                 }
@@ -226,11 +223,11 @@ int main()
                     int minEval = 1000000000;
                     for (Move m : moves) {
                         grid[m.x1][m.y1] = opC; grid[m.x2][m.y2] = opC;
-                        int eval = alphaBeta(depth - 1, alpha, beta, true, startT);
+                        int eval = alphaBeta(depth - 1, alpha, beta, true, startT, limitT);
                         grid[m.x1][m.y1] = 0; grid[m.x2][m.y2] = 0;
                         minEval = std::min(minEval, eval);
                         beta = std::min(beta, eval);
-                        if (beta <= alpha) break; // 剪枝
+                        if (beta <= alpha) break;
                     }
                     return minEval;
                 }
@@ -244,15 +241,14 @@ int main()
             for (int j = 0; j < GRIDSIZE; j++)
                 searcher.grid[i][j] = gridInfo[i][j];
 
-        // 1. 获取最顶层的候选点
         std::vector<Searcher::PointInfo> pts;
         for (int x = 0; x < GRIDSIZE; x++) {
             for (int y = 0; y < GRIDSIZE; y++) {
-                if (searcher.grid[x][y] == 0) {
+                if (searcher.grid[x][y] == grid_blank) {
                     bool near = false;
                     for (int dX = -2; dX <= 2; dX++) {
                         for (int dY = -2; dY <= 2; dY++) {
-                            if (x + dX >= 0 && x + dX < GRIDSIZE && y + dY >= 0 && y + dY < GRIDSIZE && searcher.grid[x + dX][y + dY] != 0) {
+                            if (x + dX >= 0 && x + dX < GRIDSIZE && y + dY >= 0 && y + dY < GRIDSIZE && searcher.grid[x + dX][y + dY] != grid_blank) {
                                 near = true; break;
                             }
                         }
@@ -265,10 +261,9 @@ int main()
             }
         }
         std::sort(pts.begin(), pts.end());
-        int limit = 12; // 根节点的分支可以稍微宽广一点
+        size_t limit = 12; // 已修复警告
         if (pts.size() > limit) pts.resize(limit);
 
-        // 2. 生成成对的落子组合并进行搜索
         if (pts.size() >= 2) {
             std::vector<Searcher::Move> rootMoves;
             for (size_t i = 0; i < pts.size(); i++) {
@@ -284,8 +279,7 @@ int main()
                 searcher.grid[m.x1][m.y1] = searcher.myC;
                 searcher.grid[m.x2][m.y2] = searcher.myC;
 
-                // 搜索深度设为1代表预测对方进行1回合（2颗子）的回应
-                int eval = searcher.alphaBeta(1, -1000000000, 1000000000, false, startTime);
+                int eval = searcher.alphaBeta(1, -1000000000, 1000000000, false, startTime, timeThreshold);
 
                 searcher.grid[m.x1][m.y1] = 0;
                 searcher.grid[m.x2][m.y2] = 0;
@@ -295,25 +289,61 @@ int main()
                     bestMove = m;
                 }
 
-                // 强制卡时：即将超过0.9秒直接跳出循环 [cite: 153, 154, 155]
-                if (clock() - startTime > 0.90 * CLOCKS_PER_SEC) break;
+                if ((double)(clock() - startTime) > timeThreshold) break;
             }
             startX = bestMove.x1; startY = bestMove.y1;
             resultX = bestMove.x2; resultY = bestMove.y2;
-
-        }
-        else if (pts.size() == 1) {
-            // 极个别情况（如最后无处落子）的兜底
-            startX = pts[0].x; startY = pts[0].y;
-            resultX = pts[0].x; resultY = pts[0].y;
         }
     }
+
+    // =========================================================================
+    // 【终极拦截器】如果经过上面搜索后，依然存在重合、越界或下在已有子上的情况，强制纠正
+    // =========================================================================
+    bool isIllegal = false;
+    if (selfFirstBlack) {
+        if (!inMap(startX, startY) || gridInfo[startX][startY] != grid_blank) {
+            isIllegal = true;
+        }
+    }
+    else {
+        if (!inMap(startX, startY) || !inMap(resultX, resultY) ||
+            gridInfo[startX][startY] != grid_blank ||
+            gridInfo[resultX][resultY] != grid_blank ||
+            (startX == resultX && startY == resultY)) {
+            isIllegal = true;
+        }
+    }
+
+    if (isIllegal) {
+        int emptyCount = 0;
+        for (int i = 0; i < GRIDSIZE; i++) {
+            for (int j = 0; j < GRIDSIZE; j++) {
+                if (gridInfo[i][j] == grid_blank) {
+                    if (selfFirstBlack) {
+                        startX = i; startY = j; resultX = -1; resultY = -1;
+                        emptyCount = 2; // 直接满足跳出条件
+                        break;
+                    }
+                    else {
+                        if (emptyCount == 0) {
+                            startX = i; startY = j; emptyCount++;
+                        }
+                        else if (emptyCount == 1) {
+                            resultX = i; resultY = j; emptyCount++;
+                            break;
+                        }
+                    }
+                }
+            }
+            if (emptyCount >= 2) break;
+        }
+    }
+    // =========================================================================
 
     /****在上方填充你的代码，决策结果（本方将落子的位置）存入startX、startY、resultX、resultY中****/
     /************************************************************************************/
 
     // 决策结束，向平台输出决策结果
-
     cout << startX << ' ' << startY << ' ' << resultX << ' ' << resultY << endl;
     return 0;
 }
