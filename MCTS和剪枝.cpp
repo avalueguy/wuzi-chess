@@ -1080,7 +1080,7 @@ int main()
     const bool isBlack = input["requests"][0u]["x0"].asInt() == -1;
 
 
-    //回合数小于5则使用alphabeta剪枝
+    //回合数小于35则使用alphabeta剪枝
     if (turnID <= 35) {
         Json::Value output2;
         int x0, y0, x1, y1;
