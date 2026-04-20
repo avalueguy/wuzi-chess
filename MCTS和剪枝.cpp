@@ -1081,7 +1081,7 @@ int main()
 
 
     //回合数小于5则使用alphabeta剪枝
-    if (turnID <= 5) {
+    if (turnID <= 35) {
         Json::Value output2;
         int x0, y0, x1, y1;
 
