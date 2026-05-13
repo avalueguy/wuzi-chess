@@ -18,8 +18,7 @@ using namespace std;
 
 typedef long long ll;
 
-class ConnectSix
-{
+class ConnectSix {
    public:
     static const int N = 15;
     static const int M = 15;
@@ -28,20 +27,35 @@ class ConnectSix
     static constexpr int BREADTH[DEPTH + 1] = {2, 3, 3, 4, 4, 5, 5, 6, 6, 8, 8, 12, 12};
     static constexpr double C = 1.5;
 
-    // 连续零威胁，连续一威胁，连续二威胁
+    // 原版权重（白棋使用，或黑棋计算自己进攻时使用）
     static constexpr ll WEIGHT[6][3] = {{1, 1, 1},          // 零
                                         {1, 1, 1},          // 一
                                         {1, 1, 2},          // 二
                                         {1, 3, 8},          // 三
                                         {1, 100, 10000},    // 四
                                         {1, 1000, 10050}};  // 五
-    // 零威胁夹一威胁，一威胁夹一威胁，二威胁夹一威胁
+
     static constexpr ll HOPWEIGHT[6][3] = {{1, 1, 1},          // 零
                                            {1, 1, 1},          // 一
                                            {1, 1, 1},          // 二
                                            {1, 2, 5},          // 三
                                            {1, 110, 120},      // 四
                                            {900, 950, 1050}};  // 五
+
+    // 【新增】黑棋防守专属强化权重（仅当黑棋评估白棋威胁时触发）
+    static constexpr ll WEIGHT_DEF[6][3] = {{1, 1, 1},          
+                                            {1, 2, 3},          
+                                            {1, 5, 20},         
+                                            {1, 100, 800},      // 活三威胁大幅度提升
+                                            {1, 20000, 50000},  // 堵死一头的四子和活四视为极大威胁
+                                            {1, 50000, 100000}};
+
+    static constexpr ll HOPWEIGHT_DEF[6][3] = {{1, 1, 1},          
+                                               {1, 1, 1},          
+                                               {1, 2, 5},          
+                                               {1, 20, 80},        // 强化跳三
+                                               {1, 15000, 20000},  
+                                               {9000, 10000, 20000}};
 
    public:
     enum Player {
@@ -51,62 +65,53 @@ class ConnectSix
         Out = 3,
     };
 
-    struct Coor
-    {
+    bool isBlackPlayer; // 记录当前 AI 是否执黑
+
+    struct Coor {
         int x, y;
 
-        Coor(int x = -1, int y = -1) : x(x), y(y)
-        {}
+        Coor(int x = -1, int y = -1) : x(x), y(y) {}
 
-        Coor operator+(const Coor &rhs) const
-        {
-            return {x + rhs.x, y + rhs.y};
-        }
-        Coor operator-(const Coor &rhs) const
-        {
-            return {x - rhs.x, y - rhs.y};
-        }
-        Coor operator*(int rhs) const
-        {
-            return {x * rhs, y * rhs};
-        }
-        friend Coor operator*(int lhs, const Coor &rhs)
-        {
-            return {lhs * rhs.x, lhs * rhs.y};
-        }
-        bool operator==(const Coor &rhs) const
-        {
-            return x == rhs.x && y == rhs.y;
-        }
-        bool operator!=(const Coor &rhs) const
-        {
-            return !(operator==(rhs));
-        }
-        bool operator<(const Coor &rhs) const
-        {
-            return x == rhs.x ? y < rhs.y : x < rhs.x;
-        }
+        Coor operator+(const Coor &rhs) const { return {x + rhs.x, y + rhs.y}; }
+        Coor operator-(const Coor &rhs) const { return {x - rhs.x, y - rhs.y}; }
+        Coor operator*(int rhs) const { return {x * rhs, y * rhs}; }
+        friend Coor operator*(int lhs, const Coor &rhs) { return {lhs * rhs.x, lhs * rhs.y}; }
+        bool operator==(const Coor &rhs) const { return x == rhs.x && y == rhs.y; }
+        bool operator!=(const Coor &rhs) const { return !(operator==(rhs)); }
+        bool operator<(const Coor &rhs) const { return x == rhs.x ? y < rhs.y : x < rhs.x; }
     };
 
-    struct Move
-    {
+    struct Move {
         Coor c;
         ll w1;
         int w2;
 
-        Move(ConnectSix *game, Coor coor)
-            : Move(coor, max(game->calc(coor, Self), game->calc(coor, Opp)))
-        {}
-
-        Move(Coor c, ll w) : c(c), w1(w), w2((abs(c.x - N / 2) + 1) * (abs(c.y - M / 2) + 1))
-        {}
-
-        bool operator<(const Move &rhs) const
+        Move(ConnectSix *game, Coor coor) : c(coor), w2((abs(coor.x - N / 2) + 1) * (abs(coor.y - M / 2) + 1))
         {
-            if (w1 != rhs.w1)
-                return w1 > rhs.w1;
-            if (w2 != rhs.w2)
-                return w2 < rhs.w2;
+            ll self_w = game->calc(coor, Self);
+            ll opp_w = game->calc(coor, Opp);
+            
+            if (game->isBlackPlayer) {
+                // 黑棋专属的防守优先逻辑（白棋不生效）
+                if (self_w >= WIN / 100) {
+                    w1 = self_w * 2; // 自己马上赢了，优先进攻
+                } else if (opp_w >= WIN / 100) {
+                    w1 = opp_w * 2;  // 对面马上赢了，绝对死守
+                } else {
+                    // 平常状态下，把防守权重强行放大 2 倍，逼迫 AI 选择破坏对手阵型的点
+                    w1 = max(self_w, (ll)(opp_w * 2.0)); 
+                }
+            } else {
+                // 白棋保持原版毫无改变的逻辑
+                w1 = max(self_w, opp_w);
+            }
+        }
+
+        Move(Coor c, ll w) : c(c), w1(w), w2((abs(c.x - N / 2) + 1) * (abs(c.y - M / 2) + 1)) {}
+
+        bool operator<(const Move &rhs) const {
+            if (w1 != rhs.w1) return w1 > rhs.w1;
+            if (w2 != rhs.w2) return w2 < rhs.w2;
             return c < rhs.c;
         }
     };
@@ -114,52 +119,50 @@ class ConnectSix
    private:
     static const Coor DIR[4];
 
-    struct Status  // the status of a cell, assuming that the cell is owned by *player*
-    {
+    struct Status {
         Player player;
         array<int, 2> len;     
         array<bool, 2> blank;  
         array<int, 2> hopLen;  
         array<bool, 2> hopBlank; 
 
-        Status()
-        {
+        Status() {
             len.fill(0);
             blank.fill(false);
             hopLen.fill(0);
             hopBlank.fill(false);
         }
 
-        void update(const Status &s, Player sp, int lr)
-        {
-            if (sp == Blank)
-            {
+        void update(const Status &s, Player sp, int lr) {
+            if (sp == Blank) {
                 len[lr] = 0;
                 blank[lr] = true;
                 hopLen[lr] = s.len[lr] + 1;
                 hopBlank[lr] = s.blank[lr];
-            }
-            else if (sp == player)
-            {
+            } else if (sp == player) {
                 len[lr] = s.len[lr] + 1;
                 blank[lr] = s.blank[lr];
                 hopLen[lr] = s.hopLen[lr] + 1;
                 hopBlank[lr] = s.hopBlank[lr];
-            }
-            else if (sp == (player ^ 1))
-            {
+            } else if (sp == (player ^ 1)) {
                 len[lr] = hopLen[lr] = 0;
                 blank[lr] = hopBlank[lr] = false;
             }
         }
 
-        ll weight() const
-        {
+        // 根据是否为黑棋防御模式，动态切换权重表
+        ll weight(bool isBlackDefending = false) const {
             const int totalLen = len[0] + len[1] + 1;
-            if (totalLen >= 6)
-                return WIN;
+            if (totalLen >= 6) return WIN;
             const int lHopLen = hopLen[0] + len[1];
             const int rHopLen = len[0] + hopLen[1];
+
+            if (isBlackDefending) {
+                return max({WEIGHT_DEF[totalLen][blank[0] + blank[1]],
+                            HOPWEIGHT_DEF[min(5, lHopLen)][hopBlank[0] + blank[1]],
+                            HOPWEIGHT_DEF[min(5, rHopLen)][blank[0] + hopBlank[1]]});
+            }
+
             return max({WEIGHT[totalLen][blank[0] + blank[1]],
                         HOPWEIGHT[min(5, lHopLen)][hopBlank[0] + blank[1]],
                         HOPWEIGHT[min(5, rHopLen)][blank[0] + hopBlank[1]]});
@@ -167,25 +170,15 @@ class ConnectSix
     };
 
    private:
-    static bool inGrid(Coor coor)
-    {
-        return coor.x >= 0 && coor.x < N && coor.y >= 0 && coor.y < M;
-    }
+    static bool inGrid(Coor coor) { return coor.x >= 0 && coor.x < N && coor.y >= 0 && coor.y < M; }
 
-    array<Status, 2> &s(Coor coor, int direction)
-    {
-        return status[coor.x][coor.y][direction];
-    }
-
-    Player c(Coor coor) const
-    {
-        if (!inGrid(coor))
-            return Out;
+    array<Status, 2> &s(Coor coor, int direction) { return status[coor.x][coor.y][direction]; }
+    Player c(Coor coor) const {
+        if (!inGrid(coor)) return Out;
         return grid[coor.x][coor.y];
     }
 
-    bool timeout() const
-    {
+    bool timeout() const {
         using namespace chrono;
         return duration_cast<milliseconds>(steady_clock::now() - start).count() > 960;
     }
@@ -198,32 +191,24 @@ class ConnectSix
     chrono::time_point<chrono::steady_clock> start;
 
    public:
-    explicit ConnectSix() : start(chrono::steady_clock::now())
-    {
-        for (int x = 0; x < N; ++x)
-        {
-            for (int y = 0; y < M; ++y)
-            {
+    explicit ConnectSix(bool isBlack) : start(chrono::steady_clock::now()), isBlackPlayer(isBlack) {
+        for (int x = 0; x < N; ++x) {
+            for (int y = 0; y < M; ++y) {
                 grid[x][y] = Blank;
                 const Coor u(x, y);
-                for (int i = 0; i < 4; ++i)
-                {
+                for (int i = 0; i < 4; ++i) {
                     auto &cur = s(u, i);
                     cur[0].player = (Player)0;
                     cur[1].player = (Player)1;
-                    if (inGrid(u - DIR[i]))
-                    {
+                    if (inGrid(u - DIR[i])) {
                         cur[0].blank[0] = cur[1].blank[0] = true;
                         cur[0].hopLen[0] = cur[1].hopLen[0] = 1;
-                        if (inGrid(u - DIR[i] * 2))
-                            cur[0].hopBlank[0] = cur[1].hopBlank[0] = true;
+                        if (inGrid(u - DIR[i] * 2)) cur[0].hopBlank[0] = cur[1].hopBlank[0] = true;
                     }
-                    if (inGrid(u + DIR[i]))
-                    {
+                    if (inGrid(u + DIR[i])) {
                         cur[0].blank[1] = cur[1].blank[1] = true;
                         cur[0].hopLen[1] = cur[1].hopLen[1] = 1;
-                        if (inGrid(u + DIR[i] * 2))
-                            cur[0].hopBlank[1] = cur[1].hopBlank[1] = true;
+                        if (inGrid(u + DIR[i] * 2)) cur[0].hopBlank[1] = cur[1].hopBlank[1] = true;
                     }
                 }
                 reCalc(u, Self);
@@ -233,14 +218,14 @@ class ConnectSix
         }
     }
 
-    void reCalc(Coor coor, Player player)
-    {
+    void reCalc(Coor coor, Player player) {
         ll res = 1;
-        for (int i = 0; i < 4; ++i)
-        {
-            const ll weight = status[coor.x][coor.y][i][player].weight();
-            if (weight == WIN)
-            {
+        // 如果是黑棋，且当前计算的是对手（白棋）的防守威胁，启用特殊的高压防守权重
+        bool isBlackDefending = (isBlackPlayer && player == Opp);
+
+        for (int i = 0; i < 4; ++i) {
+            const ll weight = status[coor.x][coor.y][i][player].weight(isBlackDefending);
+            if (weight == WIN) {
                 res = WIN;
                 break;
             }
@@ -249,22 +234,13 @@ class ConnectSix
         calcResult[coor.x][coor.y][player] = res;
     }
 
-    ll calc(Coor coor, Player player) const
-    {
-        return calcResult[coor.x][coor.y][player];
-    }
+    ll calc(Coor coor, Player player) const { return calcResult[coor.x][coor.y][player]; }
 
-    void modify(Coor u, Player player)
-    {
-        if (u.x == -1)
-            return;
+    void modify(Coor u, Player player) {
+        if (u.x == -1) return;
+        if (player == c(u)) return;
 
-        if (player == c(u))
-            return;
-
-        if (grid[u.x][u.y] == Blank)
-            moves.erase({this, u});
-
+        if (grid[u.x][u.y] == Blank) moves.erase({this, u});
         grid[u.x][u.y] = player;
 
         static vector<vector<int>> changed(N, vector<int>(M));
@@ -272,19 +248,14 @@ class ConnectSix
         ++changedTim;
         vector<Move> changedList;
 
-        for (int i = 0; i < 4; ++i)
-        {
-            for (int p = 0; p < 2; ++p)
-            {
+        for (int i = 0; i < 4; ++i) {
+            for (int p = 0; p < 2; ++p) {
                 const auto cur = s(u, i)[p];
-                for (int lr = 0; lr <= 1; ++lr)
-                {
+                for (int lr = 0; lr <= 1; ++lr) {
                     const auto d = lr ? DIR[i] : Coor(-DIR[i].x, -DIR[i].y);
                     const auto forTo = u + (cur.hopLen[lr] + cur.hopBlank[lr] + 1) * d;
-                    for (auto v = u + d; v != forTo; v = v + d)
-                    {
-                        if (c(v) == Blank && changed[v.x][v.y] != changedTim)
-                        {
+                    for (auto v = u + d; v != forTo; v = v + d) {
+                        if (c(v) == Blank && changed[v.x][v.y] != changedTim) {
                             changed[v.x][v.y] = changedTim;
                             changedList.emplace_back(this, v);
                         }
@@ -294,20 +265,16 @@ class ConnectSix
             }
         }
 
-        for (const auto &v : changedList)
-            moves.erase(v);
-        for (const auto &v : changedList)
-        {
+        for (const auto &v : changedList) moves.erase(v);
+        for (const auto &v : changedList) {
             reCalc(v.c, Self);
             reCalc(v.c, Opp);
             moves.emplace(this, v.c);
         }
-        if (player == Blank)
-            moves.emplace(this, u);
+        if (player == Blank) moves.emplace(this, u);
     }
 
-    struct Node
-    {
+    struct Node {
         int visit = 0;
         int win = 0;
         Player player;
@@ -318,15 +285,9 @@ class ConnectSix
         vector<Node *> children;
 
         Node(Player player, Move move1, Move move2, Node *parent, Player end = Blank)
-            : player(player),
-              end(end),
-              move1(std::move(move1)),
-              move2(std::move(move2)),
-              parent(parent)
-        {}
+            : player(player), end(end), move1(std::move(move1)), move2(std::move(move2)), parent(parent) {}
 
-        void update(Player winner)
-        {
+        void update(Player winner) {
             visit += 2;
             if (winner == (player ^ 1))
                 win += 2;
@@ -334,33 +295,24 @@ class ConnectSix
                 ++win;
         }
 
-        double uct() const
-        {
-            return (double)win / visit + C * sqrt(log(parent->visit) / visit);
-        }
+        double uct() const { return (double)win / visit + C * sqrt(log(parent->visit) / visit); }
     };
 
-    Player mcts(Node *u, int depth = DEPTH)
-    {
-        if (u->visit == 0)
-        {
-            if (u->end == Blank && depth > 0)
-            {
+    Player mcts(Node *u, int depth = DEPTH) {
+        if (u->visit == 0) {
+            if (u->end == Blank && depth > 0) {
                 const ll minw = min(1000.0, sqrt(moves.begin()->w1));
                 vector<Move> moves1;
-                for (const auto &move : moves)
-                {
+                for (const auto &move : moves) {
                     if ((int)moves1.size() >= max(2, BREADTH[depth] / 2) &&
                         (move.w1 < minw || (int)moves1.size() >= BREADTH[depth]))
                         break;
                     moves1.emplace_back(move);
                 }
                 set<pair<Coor, Coor>> vis;
-                for (int i = 0; i < (int)moves1.size(); ++i)
-                {
+                for (int i = 0; i < (int)moves1.size(); ++i) {
                     const auto move1 = moves1[i];
-                    if (calc(move1.c, u->player) == WIN)
-                    {
+                    if (calc(move1.c, u->player) == WIN) {
                         u->children = {new Node(Player(u->player ^ 1), move1,
                                                 moves1[i == 0 ? 1 : i - 1], u, u->player)};
                         break;
@@ -368,45 +320,36 @@ class ConnectSix
                     int cnt = 0;
                     bool win = false;
                     modify(move1.c, u->player);
-                    for (const auto &move2 : moves)
-                    {
+                    for (const auto &move2 : moves) {
                         if (!vis.insert({min(move1.c, move2.c), max(move1.c, move2.c)}).second)
                             continue;
-                        if (++cnt > (BREADTH[depth] - i) / 2 + 1)
-                            break;
-                        if (calc(move2.c, u->player) == WIN)
-                        {
+                        if (++cnt > (BREADTH[depth] - i) / 2 + 1) break;
+                        if (calc(move2.c, u->player) == WIN) {
                             win = true;
-                            u->children = {
-                                new Node(Player(u->player ^ 1), move1, move2, u, u->player)};
+                            u->children = {new Node(Player(u->player ^ 1), move1, move2, u, u->player)};
                             break;
                         }
                         u->children.push_back(new Node(Player(u->player ^ 1), move1, move2, u));
                     }
                     modify(move1.c, Blank);
-                    if (win)
-                        break;
+                    if (win) break;
                 }
             }
         }
 
-        if (u->children.empty())
-        {
+        if (u->children.empty()) {
             u->update(u->end);
             return u->end;
         }
 
         double mx = -1;
         Node *choose = nullptr;
-        for (auto v : u->children)
-        {
-            if (v->visit == 0)
-            {
+        for (auto v : u->children) {
+            if (v->visit == 0) {
                 choose = v;
                 break;
             }
-            if (v->uct() > mx)
-            {
+            if (v->uct() > mx) {
                 mx = v->uct();
                 choose = v;
             }
@@ -421,21 +364,17 @@ class ConnectSix
         return res;
     }
 
-    Json::Value mcts()
-    {
+    Json::Value mcts() {
         auto *root = new Node(Self, {{-1, -1}, 0}, {{-1, -1}, 0}, nullptr);
 
-        while (!timeout())
-            mcts(root);
+        while (!timeout()) mcts(root);
 
-        const auto best =
-            *max_element(root->children.begin(), root->children.end(), [](Node *lhs, Node *rhs) {
-                return lhs->visit < rhs->visit;
-            });
+        const auto best = *max_element(root->children.begin(), root->children.end(), [](Node *lhs, Node *rhs) {
+            return lhs->visit < rhs->visit;
+        });
 
         ostringstream debug;
-        for (auto v : root->children)
-        {
+        for (auto v : root->children) {
             debug << v->move1.c.x << ',' << v->move1.c.y << ' ' << v->move1.w1 << ' ';
             debug << v->move2.c.x << ',' << v->move2.c.y << ' ' << v->move2.w1 << ' ';
             debug << v->win << '/' << v->visit - v->win << "    ";
@@ -452,68 +391,45 @@ class ConnectSix
     }
 
     // =========================================================
-    // 开局定式：只管黑棋的前两步，白棋 100% 交给 MCTS！
+    // 开局定式：黑棋只下天元，第二步绝对不死板，交给加强后的 MCTS 防守
     // =========================================================
-    bool use_opening_book(int turnID, bool isBlack, Json::Value& output)
-    {
-        // 1. 黑棋第 1 回合定式：落子天元
-        if (turnID == 1 && isBlack) {
+    bool use_opening_book(int turnID, Json::Value& output) {
+        if (turnID == 1 && isBlackPlayer) {
             output["response"]["x0"] = N / 2;
             output["response"]["y0"] = M / 2;
             output["response"]["x1"] = -1;
             output["response"]["y1"] = -1;
             return true;
         }
-        
-        // 2. 黑棋第 2 回合定式：解除前期的防守恐慌，强行围绕天元布阵
-        if (turnID == 2 && isBlack) {
-            int pairs[4][4] = {{6, 6, 8, 8}, {6, 8, 8, 6}, {6, 7, 8, 7}, {7, 6, 7, 8}};
-            for (int i = 0; i < 4; i++) {
-                if (c({pairs[i][0], pairs[i][1]}) == Blank && c({pairs[i][2], pairs[i][3]}) == Blank) {
-                    output["response"]["x0"] = pairs[i][0];
-                    output["response"]["y0"] = pairs[i][1];
-                    output["response"]["x1"] = pairs[i][2];
-                    output["response"]["y1"] = pairs[i][3];
-                    return true;
-                }
-            }
-        }
-        
-        // 删除了白棋定式！白棋没有任何定式，全部依靠 MCTS！
         return false;
     }
 };
 
 const ConnectSix::Coor ConnectSix::DIR[4] = {{0, 1}, {1, 0}, {1, 1}, {1, -1}};
 
-int main()
-{
+int main() {
     string str;
     getline(cin, str);
     Json::Value input;
     Json::Reader().parse(str, input);
+    
     const int turnID = input["requests"].size();
     const bool isBlack = input["requests"][0u]["x0"].asInt() == -1;
-    ConnectSix game;
-    for (int i = 0; i < turnID; i++)
-    {
-        game.modify({input["requests"][i]["x0"].asInt(), input["requests"][i]["y0"].asInt()},
-                    ConnectSix::Opp);
-        game.modify({input["requests"][i]["x1"].asInt(), input["requests"][i]["y1"].asInt()},
-                    ConnectSix::Opp);
-        if (i == turnID - 1)
-            break;
-        game.modify({input["responses"][i]["x0"].asInt(), input["responses"][i]["y0"].asInt()},
-                    ConnectSix::Self);
-        game.modify({input["responses"][i]["x1"].asInt(), input["responses"][i]["y1"].asInt()},
-                    ConnectSix::Self);
+    
+    // 初始化时注入身份，保证白棋逻辑完全不被污染
+    ConnectSix game(isBlack); 
+    
+    for (int i = 0; i < turnID; i++) {
+        game.modify({input["requests"][i]["x0"].asInt(), input["requests"][i]["y0"].asInt()}, ConnectSix::Opp);
+        game.modify({input["requests"][i]["x1"].asInt(), input["requests"][i]["y1"].asInt()}, ConnectSix::Opp);
+        if (i == turnID - 1) break;
+        game.modify({input["responses"][i]["x0"].asInt(), input["responses"][i]["y0"].asInt()}, ConnectSix::Self);
+        game.modify({input["responses"][i]["x1"].asInt(), input["responses"][i]["y1"].asInt()}, ConnectSix::Self);
     }
 
     Json::Value output;
 
-    // 拦截处理：优先询问定式库，如果不命中，调用你一字未改的 mcts()
-    if (!game.use_opening_book(turnID, isBlack, output))
-    {
+    if (!game.use_opening_book(turnID, output)) {
         output = game.mcts();
     }
 
