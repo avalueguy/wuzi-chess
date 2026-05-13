@@ -1,0 +1,438 @@
+#ifdef _BOTZONE_ONLINE
+#include "jsoncpp/json.h"
+#else
+#include <json/json.h>
+#endif
+
+#include <algorithm>
+#include <array>
+#include <chrono>
+#include <cmath>
+#include <iostream>
+#include <random>
+#include <set>
+#include <sstream>
+#include <vector>
+
+using namespace std;
+
+typedef long long ll;
+
+class GX {
+   public:
+    static const int R = 15;
+    static const int C = 15;
+    static const ll INF = 1e18;
+    static const int D = 12;
+    static constexpr int BW[D + 1] = {2, 3, 3, 4, 4, 5, 5, 6, 6, 8, 8, 12, 12};
+    static constexpr double UCTK = 1.5;
+
+    // 原版权重（白棋使用，或黑棋计算自己进攻时使用）
+    static constexpr ll W1[6][3] = {{1, 1, 1},          // 零
+                                     {1, 1, 1},          // 一
+                                     {1, 1, 2},          // 二
+                                     {1, 3, 8},          // 三
+                                     {1, 100, 10000},    // 四
+                                     {1, 1000, 10050}};  // 五
+
+    static constexpr ll W2[6][3] = {{1, 1, 1},          // 零
+                                     {1, 1, 1},          // 一
+                                     {1, 1, 1},          // 二
+                                     {1, 2, 5},          // 三
+                                     {1, 110, 120},      // 四
+                                     {900, 950, 1050}};  // 五
+
+    // 【新增】黑棋防守专属强化权重（仅当黑棋评估白棋威胁时触发）
+    static constexpr ll DW1[6][3] = {{1, 1, 1},
+                                      {1, 2, 3},
+                                      {1, 5, 20},
+                                      {1, 100, 800},      // 活三威胁大幅度提升
+                                      {1, 20000, 50000},  // 堵死一头的四子和活四视为极大威胁
+                                      {1, 50000, 100000}};
+
+    static constexpr ll DW2[6][3] = {{1, 1, 1},
+                                      {1, 1, 1},
+                                      {1, 2, 5},
+                                      {1, 20, 80},        // 强化跳三
+                                      {1, 15000, 20000},
+                                      {9000, 10000, 20000}};
+
+   public:
+    enum Player {
+        Me = 0,
+        You = 1,
+        Emp = 2,
+        Edge = 3,
+    };
+
+    bool blackSide; // 记录当前 AI 是否执黑
+
+    struct P {
+        int r, c;
+
+        P(int r = -1, int c = -1) : r(r), c(c) {}
+
+        P operator+(const P &x) const { return {r + x.r, c + x.c}; }
+        P operator-(const P &x) const { return {r - x.r, c - x.c}; }
+        P operator*(int k) const { return {r * k, c * k}; }
+        friend P operator*(int k, const P &x) { return {k * x.r, k * x.c}; }
+        bool operator==(const P &x) const { return r == x.r && c == x.c; }
+        bool operator!=(const P &x) const { return !(*this == x); }
+        bool operator<(const P &x) const { return r == x.r ? c < x.c : r < x.r; }
+    };
+
+    struct Step {
+        P p;
+        ll s1;
+        int s2;
+
+        Step(GX *g, P q) : p(q), s2((abs(q.r - R / 2) + 1) * (abs(q.c - C / 2) + 1)) {
+            ll self_w = g->score(q, Me);
+            ll opp_w = g->score(q, You);
+
+            if (g->blackSide) {
+                // 黑棋专属的防守优先逻辑（白棋不生效）
+                if (self_w >= INF / 100) {
+                    s1 = self_w * 2; // 自己马上赢了，优先进攻
+                } else if (opp_w >= INF / 100) {
+                    s1 = opp_w * 2;  // 对面马上赢了，绝对死守
+                } else {
+                    // 平常状态下，把防守权重强行放大 2 倍，逼迫 AI 选择破坏对手阵型的点
+                    s1 = max(self_w, (ll)(opp_w * 2.0));
+                }
+            } else {
+                // 白棋保持原版毫无改变的逻辑
+                s1 = max(self_w, opp_w);
+            }
+        }
+
+        Step(P p, ll w) : p(p), s1(w), s2((abs(p.r - R / 2) + 1) * (abs(p.c - C / 2) + 1)) {}
+
+        bool operator<(const Step &x) const {
+            if (s1 != x.s1) return s1 > x.s1;
+            if (s2 != x.s2) return s2 < x.s2;
+            return p < x.p;
+        }
+    };
+
+   private:
+    static const P dir[4];
+
+    struct Info {
+        Player who;
+        array<int, 2> cnt;
+        array<bool, 2> open;
+        array<int, 2> jump;
+        array<bool, 2> jumpOpen;
+
+        Info() {
+            cnt.fill(0);
+            open.fill(false);
+            jump.fill(0);
+            jumpOpen.fill(false);
+        }
+
+        void push(const Info &x, Player sp, int lr) {
+            if (sp == Emp) {
+                cnt[lr] = 0;
+                open[lr] = true;
+                jump[lr] = x.cnt[lr] + 1;
+                jumpOpen[lr] = x.open[lr];
+            } else if (sp == who) {
+                cnt[lr] = x.cnt[lr] + 1;
+                open[lr] = x.open[lr];
+                jump[lr] = x.jump[lr] + 1;
+                jumpOpen[lr] = x.jumpOpen[lr];
+            } else if (sp == (who ^ 1)) {
+                cnt[lr] = jump[lr] = 0;
+                open[lr] = jumpOpen[lr] = false;
+            }
+        }
+
+        // 根据是否为黑棋防御模式，动态切换权重表
+        ll eval(bool blackDef = false) const {
+            const int totalLen = cnt[0] + cnt[1] + 1;
+            if (totalLen >= 6) return INF;
+            const int lHopLen = jump[0] + cnt[1];
+            const int rHopLen = cnt[0] + jump[1];
+
+            if (blackDef) {
+                return max({DW1[totalLen][open[0] + open[1]],
+                            DW2[min(5, lHopLen)][jumpOpen[0] + open[1]],
+                            DW2[min(5, rHopLen)][open[0] + jumpOpen[1]]});
+            }
+
+            return max({W1[totalLen][open[0] + open[1]],
+                        W2[min(5, lHopLen)][jumpOpen[0] + open[1]],
+                        W2[min(5, rHopLen)][open[0] + jumpOpen[1]]});
+        }
+    };
+
+   private:
+    static bool inside(P p) { return p.r >= 0 && p.r < R && p.c >= 0 && p.c < C; }
+
+    array<Info, 2> &stt(P p, int k) { return st[p.r][p.c][k]; }
+    Player cell(P p) const {
+        if (!inside(p)) return Edge;
+        return bd[p.r][p.c];
+    }
+
+    bool isTimeout() const {
+        using namespace chrono;
+        return duration_cast<milliseconds>(steady_clock::now() - stTime).count() > 960;
+    }
+
+   private:
+    array<array<Player, C>, R> bd;
+    array<array<array<array<Info, 2>, 4>, C>, R> st;
+    array<array<array<ll, 2>, C>, R> val;
+    set<Step> cand;
+    chrono::time_point<chrono::steady_clock> stTime;
+
+   public:
+    explicit GX(bool isBlack) : stTime(chrono::steady_clock::now()), blackSide(isBlack) {
+        for (int r = 0; r < R; ++r) {
+            for (int c = 0; c < C; ++c) {
+                bd[r][c] = Emp;
+                const P p(r, c);
+                for (int i = 0; i < 4; ++i) {
+                    auto &cur = stt(p, i);
+                    cur[0].who = (Player)0;
+                    cur[1].who = (Player)1;
+                    if (inside(p - dir[i])) {
+                        cur[0].open[0] = cur[1].open[0] = true;
+                        cur[0].jump[0] = cur[1].jump[0] = 1;
+                        if (inside(p - dir[i] * 2)) cur[0].jumpOpen[0] = cur[1].jumpOpen[0] = true;
+                    }
+                    if (inside(p + dir[i])) {
+                        cur[0].open[1] = cur[1].open[1] = true;
+                        cur[0].jump[1] = cur[1].jump[1] = 1;
+                        if (inside(p + dir[i] * 2)) cur[0].jumpOpen[1] = cur[1].jumpOpen[1] = true;
+                    }
+                }
+                refresh(p, Me);
+                refresh(p, You);
+                cand.emplace(this, p);
+            }
+        }
+    }
+
+    void refresh(P p, Player who) {
+        ll ans = 1;
+        // 如果是黑棋，且当前计算的是对手（白棋）的防守威胁，启用特殊的高压防守权重
+        bool blackDef = (blackSide && who == You);
+
+        for (int i = 0; i < 4; ++i) {
+            const ll w = st[p.r][p.c][i][who].eval(blackDef);
+            if (w == INF) {
+                ans = INF;
+                break;
+            }
+            ans *= w;
+        }
+        val[p.r][p.c][who] = ans;
+    }
+
+    ll score(P p, Player who) const { return val[p.r][p.c][who]; }
+
+    void put(P p, Player who) {
+        if (p.r == -1) return;
+        if (who == cell(p)) return;
+
+        if (bd[p.r][p.c] == Emp) cand.erase({this, p});
+        bd[p.r][p.c] = who;
+
+        static vector<vector<int>> tag(R, vector<int>(C));
+        static int tim = 0;
+        ++tim;
+        vector<Step> changed;
+
+        for (int i = 0; i < 4; ++i) {
+            for (int side = 0; side < 2; ++side) {
+                const auto cur = stt(p, i)[side];
+                for (int lr = 0; lr <= 1; ++lr) {
+                    const auto d = lr ? dir[i] : P(-dir[i].r, -dir[i].c);
+                    const auto to = p + (cur.jump[lr] + cur.jumpOpen[lr] + 1) * d;
+                    for (auto q = p + d; q != to; q = q + d) {
+                        if (cell(q) == Emp && tag[q.r][q.c] != tim) {
+                            tag[q.r][q.c] = tim;
+                            changed.emplace_back(this, q);
+                        }
+                        stt(q, i)[side].push(stt(q - d, i)[side], cell(q - d), lr ^ 1);
+                    }
+                }
+            }
+        }
+
+        for (const auto &q : changed) cand.erase(q);
+        for (const auto &q : changed) {
+            refresh(q.p, Me);
+            refresh(q.p, You);
+            cand.emplace(this, q.p);
+        }
+        if (who == Emp) cand.emplace(this, p);
+    }
+
+    struct Tree {
+        int vis = 0;
+        int win = 0;
+        Player turn;
+        Player end;
+        Step a;
+        Step b;
+        Tree *fa;
+        vector<Tree *> son;
+
+        Tree(Player turn, Step a, Step b, Tree *fa, Player end = Emp)
+            : turn(turn), end(end), a(std::move(a)), b(std::move(b)), fa(fa) {}
+
+        void push(Player winner) {
+            vis += 2;
+            if (winner == (turn ^ 1))
+                win += 2;
+            else if (winner == Emp)
+                ++win;
+        }
+
+        double value() const { return (double)win / vis + UCTK * sqrt(log(fa->vis) / vis); }
+    };
+
+    Player search(Tree *u, int dep = D) {
+        if (u->vis == 0) {
+            if (u->end == Emp && dep > 0) {
+                const ll minw = min(1000.0, sqrt(cand.begin()->s1));
+                vector<Step> first;
+                for (const auto &mv : cand) {
+                    if ((int)first.size() >= max(2, BW[dep] / 2) &&
+                        (mv.s1 < minw || (int)first.size() >= BW[dep]))
+                        break;
+                    first.emplace_back(mv);
+                }
+                set<pair<P, P>> vis;
+                for (int i = 0; i < (int)first.size(); ++i) {
+                    const auto m1 = first[i];
+                    if (score(m1.p, u->turn) == INF) {
+                        u->son = {new Tree(Player(u->turn ^ 1), m1,
+                                            first[i == 0 ? 1 : i - 1], u, u->turn)};
+                        break;
+                    }
+                    int cnt = 0;
+                    bool ok = false;
+                    put(m1.p, u->turn);
+                    for (const auto &m2 : cand) {
+                        if (!vis.insert({min(m1.p, m2.p), max(m1.p, m2.p)}).second)
+                            continue;
+                        if (++cnt > (BW[dep] - i) / 2 + 1) break;
+                        if (score(m2.p, u->turn) == INF) {
+                            ok = true;
+                            u->son = {new Tree(Player(u->turn ^ 1), m1, m2, u, u->turn)};
+                            break;
+                        }
+                        u->son.push_back(new Tree(Player(u->turn ^ 1), m1, m2, u));
+                    }
+                    put(m1.p, Emp);
+                    if (ok) break;
+                }
+            }
+        }
+
+        if (u->son.empty()) {
+            u->push(u->end);
+            return u->end;
+        }
+
+        double best = -1;
+        Tree *nxt = nullptr;
+        for (auto v : u->son) {
+            if (v->vis == 0) {
+                nxt = v;
+                break;
+            }
+            if (v->value() > best) {
+                best = v->value();
+                nxt = v;
+            }
+        }
+
+        put(nxt->a.p, u->turn);
+        put(nxt->b.p, u->turn);
+        const auto ans = search(nxt, dep - 1);
+        put(nxt->b.p, Emp);
+        put(nxt->a.p, Emp);
+        u->push(ans);
+        return ans;
+    }
+
+    Json::Value search() {
+        auto *root = new Tree(Me, {{-1, -1}, 0}, {{-1, -1}, 0}, nullptr);
+
+        while (!isTimeout()) search(root);
+
+        const auto best = *max_element(root->son.begin(), root->son.end(), [](Tree *x, Tree *y) {
+            return x->vis < y->vis;
+        });
+
+        ostringstream dbg;
+        for (auto v : root->son) {
+            dbg << v->a.p.r << ',' << v->a.p.c << ' ' << v->a.s1 << ' ';
+            dbg << v->b.p.r << ',' << v->b.p.c << ' ' << v->b.s1 << ' ';
+            dbg << v->win << '/' << v->vis - v->win << "    ";
+        }
+
+        Json::Value out;
+        out["response"]["x0"] = best->a.p.r;
+        out["response"]["y0"] = best->a.p.c;
+        out["response"]["x1"] = best->b.p.r;
+        out["response"]["y1"] = best->b.p.c;
+        out["debug"] = dbg.str();
+
+        return out;
+    }
+
+    // =========================================================
+    // 开局定式：黑棋只下天元，第二步绝对不死板，交给加强后的 MCTS 防守
+    // =========================================================
+    bool opening(int turnID, Json::Value& out) {
+        if (turnID == 1 && blackSide) {
+            out["response"]["x0"] = R / 2;
+            out["response"]["y0"] = C / 2;
+            out["response"]["x1"] = -1;
+            out["response"]["y1"] = -1;
+            return true;
+        }
+        return false;
+    }
+};
+
+const GX::P GX::dir[4] = {{0, 1}, {1, 0}, {1, 1}, {1, -1}};
+
+int main() {
+    string js;
+    getline(cin, js);
+    Json::Value in;
+    Json::Reader().parse(js, in);
+
+    const int turnID = in["requests"].size();
+    const bool isBlack = in["requests"][0u]["x0"].asInt() == -1;
+
+    // 初始化时注入身份，保证白棋逻辑完全不被污染
+    GX game(isBlack);
+
+    for (int i = 0; i < turnID; i++) {
+        game.put({in["requests"][i]["x0"].asInt(), in["requests"][i]["y0"].asInt()}, GX::You);
+        game.put({in["requests"][i]["x1"].asInt(), in["requests"][i]["y1"].asInt()}, GX::You);
+        if (i == turnID - 1) break;
+        game.put({in["responses"][i]["x0"].asInt(), in["responses"][i]["y0"].asInt()}, GX::Me);
+        game.put({in["responses"][i]["x1"].asInt(), in["responses"][i]["y1"].asInt()}, GX::Me);
+    }
+
+    Json::Value out;
+
+    if (!game.opening(turnID, out)) {
+        out = game.search();
+    }
+
+    cout << Json::FastWriter().write(out) << endl;
+
+    return 0;
+}
