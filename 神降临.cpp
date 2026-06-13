@@ -5,435 +5,553 @@
 #endif
 
 #include <algorithm>
-#include <array>
 #include <chrono>
 #include <cmath>
 #include <iostream>
-#include <random>
 #include <set>
 #include <sstream>
 #include <vector>
 
 using namespace std;
+using int64 = long long;
 
-typedef long long ll;
 
-class ConnectSix {
-   public:
-    static const int N = 15;
-    static const int M = 15;
-    static const ll WIN = 1e18;
-    static const int DEPTH = 12;
-    static constexpr int BREADTH[DEPTH + 1] = {2, 3, 3, 4, 4, 5, 5, 6, 6, 8, 8, 12, 12};
-    static constexpr double C = 1.5;
+const int BOARD_ROWS = 15;
+const int BOARD_COLS = 15;
+const int64 SCORE_INFINITY = 1e18;
+const int MAX_SEARCH_DEPTH = 12;
+const double UCT_EXPLORE_CONST = 1.5;
 
-    // 原版权重（白棋使用，或黑棋计算自己进攻时使用）
-    static constexpr ll WEIGHT[6][3] = {{1, 1, 1},          // 零
-                                        {1, 1, 1},          // 一
-                                        {1, 1, 2},          // 二
-                                        {1, 3, 8},          // 三
-                                        {1, 100, 10000},    // 四
-                                        {1, 1000, 10050}};  // 五
+constexpr int WIDTH_LIMITS[MAX_SEARCH_DEPTH + 1] = {2, 3, 3, 4, 4, 5, 5, 6, 6, 8, 8, 12, 12};
 
-    static constexpr ll HOPWEIGHT[6][3] = {{1, 1, 1},          // 零
-                                           {1, 1, 1},          // 一
-                                           {1, 1, 1},          // 二
-                                           {1, 2, 5},          // 三
-                                           {1, 110, 120},      // 四
-                                           {900, 950, 1050}};  // 五
+constexpr int64 W_ATK[6][3] = {
+    {1, 1, 1}, {1, 1, 1}, {1, 1, 2}, {1, 3, 8}, {1, 100, 10000}, {1, 1000, 10050}
+};
+constexpr int64 W_HOP_ATK[6][3] = {
+    {1, 1, 1}, {1, 1, 1}, {1, 1, 1}, {1, 2, 5}, {1, 110, 120}, {900, 950, 1050}
+};
 
-    // 【新增】黑棋防守专属强化权重（仅当黑棋评估白棋威胁时触发）
-    static constexpr ll WEIGHT_DEF[6][3] = {{1, 1, 1},          
-                                            {1, 2, 3},          
-                                            {1, 5, 20},         
-                                            {1, 100, 800},      // 活三威胁大幅度提升
-                                            {1, 20000, 50000},  // 堵死一头的四子和活四视为极大威胁
-                                            {1, 50000, 100000}};
 
-    static constexpr ll HOPWEIGHT_DEF[6][3] = {{1, 1, 1},          
-                                               {1, 1, 1},          
-                                               {1, 2, 5},          
-                                               {1, 20, 80},        // 强化跳三
-                                               {1, 15000, 20000},  
-                                               {9000, 10000, 20000}};
+constexpr int64 W_DEF[6][3] = {
+    {1, 1, 1}, {1, 2, 3}, {1, 5, 20}, {1, 100, 800}, {1, 20000, 50000}, {1, 50000, 100000}
+};
+constexpr int64 W_HOP_DEF[6][3] = {
+    {1, 1, 1}, {1, 1, 1}, {1, 2, 5}, {1, 20, 80}, {1, 15000, 20000}, {9000, 10000, 20000}
+};
 
-   public:
-    enum Player {
-        Self = 0,
-        Opp = 1,
-        Blank = 2,
-        Out = 3,
-    };
+enum Faction {
+    MYSELF = 0,
+    OPPONENT = 1,
+    EMPTY_CELL = 2,
+    OUT_OF_BOUNDS = 3
+};
 
-    bool isBlackPlayer; // 记录当前 AI 是否执黑
+struct Point2D {
+    int r, c;
+    Point2D(int r_val = -1, int c_val = -1) {
+        r = r_val;
+        c = c_val;
+    }
+    Point2D operator+(const Point2D &other) const { return Point2D(r + other.r, c + other.c); }
+    Point2D operator-(const Point2D &other) const { return Point2D(r - other.r, c - other.c); }
+    Point2D operator*(int multiplier) const { return Point2D(r * multiplier, c * multiplier); }
+    friend Point2D operator*(int multiplier, const Point2D &pt) { return Point2D(multiplier * pt.r, multiplier * pt.c); }
+    bool operator==(const Point2D &other) const { return r == other.r && c == other.c; }
+    bool operator!=(const Point2D &other) const { return r != other.r || c != other.c; }
+    bool operator<(const Point2D &other) const {
+        if (r == other.r) return c < other.c;
+        return r < other.r;
+    }
+};
 
-    struct Coor {
-        int x, y;
+const Point2D DELTA_DIRS[4] = { Point2D(0, 1), Point2D(1, 0), Point2D(1, 1), Point2D(1, -1) };
 
-        Coor(int x = -1, int y = -1) : x(x), y(y) {}
+class AlphaGomokuEngine;
 
-        Coor operator+(const Coor &rhs) const { return {x + rhs.x, y + rhs.y}; }
-        Coor operator-(const Coor &rhs) const { return {x - rhs.x, y - rhs.y}; }
-        Coor operator*(int rhs) const { return {x * rhs, y * rhs}; }
-        friend Coor operator*(int lhs, const Coor &rhs) { return {lhs * rhs.x, lhs * rhs.y}; }
-        bool operator==(const Coor &rhs) const { return x == rhs.x && y == rhs.y; }
-        bool operator!=(const Coor &rhs) const { return !(operator==(rhs)); }
-        bool operator<(const Coor &rhs) const { return x == rhs.x ? y < rhs.y : x < rhs.x; }
-    };
+struct CandidateAction {
+    Point2D pt;
+    int64 priorityScore;
+    int centerDistance;
 
-    struct Move {
-        Coor c;
-        ll w1;
-        int w2;
-
-        Move(ConnectSix *game, Coor coor) : c(coor), w2((abs(coor.x - N / 2) + 1) * (abs(coor.y - M / 2) + 1))
-        {
-            ll self_w = game->calc(coor, Self);
-            ll opp_w = game->calc(coor, Opp);
-            
-            if (game->isBlackPlayer) {
-                // 黑棋专属的防守优先逻辑（白棋不生效）
-                if (self_w >= WIN / 100) {
-                    w1 = self_w * 2; // 自己马上赢了，优先进攻
-                } else if (opp_w >= WIN / 100) {
-                    w1 = opp_w * 2;  // 对面马上赢了，绝对死守
-                } else {
-                    // 平常状态下，把防守权重强行放大 2 倍，逼迫 AI 选择破坏对手阵型的点
-                    w1 = max(self_w, (ll)(opp_w * 2.0)); 
-                }
-            } else {
-                // 白棋保持原版毫无改变的逻辑
-                w1 = max(self_w, opp_w);
-            }
-        }
-
-        Move(Coor c, ll w) : c(c), w1(w), w2((abs(c.x - N / 2) + 1) * (abs(c.y - M / 2) + 1)) {}
-
-        bool operator<(const Move &rhs) const {
-            if (w1 != rhs.w1) return w1 > rhs.w1;
-            if (w2 != rhs.w2) return w2 < rhs.w2;
-            return c < rhs.c;
-        }
-    };
-
-   private:
-    static const Coor DIR[4];
-
-    struct Status {
-        Player player;
-        array<int, 2> len;     
-        array<bool, 2> blank;  
-        array<int, 2> hopLen;  
-        array<bool, 2> hopBlank; 
-
-        Status() {
-            len.fill(0);
-            blank.fill(false);
-            hopLen.fill(0);
-            hopBlank.fill(false);
-        }
-
-        void update(const Status &s, Player sp, int lr) {
-            if (sp == Blank) {
-                len[lr] = 0;
-                blank[lr] = true;
-                hopLen[lr] = s.len[lr] + 1;
-                hopBlank[lr] = s.blank[lr];
-            } else if (sp == player) {
-                len[lr] = s.len[lr] + 1;
-                blank[lr] = s.blank[lr];
-                hopLen[lr] = s.hopLen[lr] + 1;
-                hopBlank[lr] = s.hopBlank[lr];
-            } else if (sp == (player ^ 1)) {
-                len[lr] = hopLen[lr] = 0;
-                blank[lr] = hopBlank[lr] = false;
-            }
-        }
-
-        // 根据是否为黑棋防御模式，动态切换权重表
-        ll weight(bool isBlackDefending = false) const {
-            const int totalLen = len[0] + len[1] + 1;
-            if (totalLen >= 6) return WIN;
-            const int lHopLen = hopLen[0] + len[1];
-            const int rHopLen = len[0] + hopLen[1];
-
-            if (isBlackDefending) {
-                return max({WEIGHT_DEF[totalLen][blank[0] + blank[1]],
-                            HOPWEIGHT_DEF[min(5, lHopLen)][hopBlank[0] + blank[1]],
-                            HOPWEIGHT_DEF[min(5, rHopLen)][blank[0] + hopBlank[1]]});
-            }
-
-            return max({WEIGHT[totalLen][blank[0] + blank[1]],
-                        HOPWEIGHT[min(5, lHopLen)][hopBlank[0] + blank[1]],
-                        HOPWEIGHT[min(5, rHopLen)][blank[0] + hopBlank[1]]});
-        }
-    };
-
-   private:
-    static bool inGrid(Coor coor) { return coor.x >= 0 && coor.x < N && coor.y >= 0 && coor.y < M; }
-
-    array<Status, 2> &s(Coor coor, int direction) { return status[coor.x][coor.y][direction]; }
-    Player c(Coor coor) const {
-        if (!inGrid(coor)) return Out;
-        return grid[coor.x][coor.y];
+    CandidateAction() {
+        pt = Point2D(-1, -1);
+        priorityScore = 0;
+        centerDistance = 0;
     }
 
-    bool timeout() const {
-        using namespace chrono;
-        return duration_cast<milliseconds>(steady_clock::now() - start).count() > 960;
+    CandidateAction(AlphaGomokuEngine *enginePtr, Point2D pos);
+    
+    CandidateAction(Point2D pos, int64 w) {
+        pt = pos;
+        priorityScore = w;
+        int dr = abs(pos.r - BOARD_ROWS / 2) + 1;
+        int dc = abs(pos.c - BOARD_COLS / 2) + 1;
+        centerDistance = dr * dc;
     }
 
-   private:
-    array<array<Player, M>, N> grid;
-    array<array<array<array<Status, 2>, 4>, M>, N> status;
-    array<array<array<ll, 2>, M>, N> calcResult;
-    set<Move> moves;
-    chrono::time_point<chrono::steady_clock> start;
 
-   public:
-    explicit ConnectSix(bool isBlack) : start(chrono::steady_clock::now()), isBlackPlayer(isBlack) {
-        for (int x = 0; x < N; ++x) {
-            for (int y = 0; y < M; ++y) {
-                grid[x][y] = Blank;
-                const Coor u(x, y);
-                for (int i = 0; i < 4; ++i) {
-                    auto &cur = s(u, i);
-                    cur[0].player = (Player)0;
-                    cur[1].player = (Player)1;
-                    if (inGrid(u - DIR[i])) {
-                        cur[0].blank[0] = cur[1].blank[0] = true;
-                        cur[0].hopLen[0] = cur[1].hopLen[0] = 1;
-                        if (inGrid(u - DIR[i] * 2)) cur[0].hopBlank[0] = cur[1].hopBlank[0] = true;
+    bool operator<(const CandidateAction &other) const {
+        bool prioDiff = (priorityScore != other.priorityScore);
+        if (prioDiff) {
+            return priorityScore > other.priorityScore;
+        }
+        bool distDiff = (centerDistance != other.centerDistance);
+        if (distDiff) {
+            return centerDistance < other.centerDistance;
+        }
+        return pt < other.pt;
+    }
+};
+
+struct SequenceState {
+    Faction ownerSide;
+    int straightLen[2];     
+    bool isOpenEnd[2];  
+    int jumpLen[2];  
+    bool isJumpOpen[2]; 
+
+    SequenceState() {
+        straightLen[0] = straightLen[1] = 0;
+        isOpenEnd[0] = isOpenEnd[1] = false;
+        jumpLen[0] = jumpLen[1] = 0;
+        isJumpOpen[0] = isJumpOpen[1] = false;
+    }
+
+    void mergeForward(const SequenceState &prevNode, Faction targetSide, int dirFlag) {
+        if (targetSide == EMPTY_CELL) {
+            straightLen[dirFlag] = 0;
+            isOpenEnd[dirFlag] = true;
+            jumpLen[dirFlag] = prevNode.straightLen[dirFlag] + 1;
+            isJumpOpen[dirFlag] = prevNode.isOpenEnd[dirFlag];
+        } else if (targetSide == ownerSide) {
+            straightLen[dirFlag] = prevNode.straightLen[dirFlag] + 1;
+            isOpenEnd[dirFlag] = prevNode.isOpenEnd[dirFlag];
+            jumpLen[dirFlag] = prevNode.jumpLen[dirFlag] + 1;
+            isJumpOpen[dirFlag] = prevNode.isJumpOpen[dirFlag];
+        } else {
+            straightLen[dirFlag] = 0;
+            jumpLen[dirFlag] = 0;
+            isOpenEnd[dirFlag] = false;
+            isJumpOpen[dirFlag] = false;
+        }
+    }
+
+    int64 computeThreat(bool applyDefensiveBoost) const {
+        int totalConnected = straightLen[0] + straightLen[1] + 1;
+        if (totalConnected >= 6) return SCORE_INFINITY;
+        
+        int hopLeft = jumpLen[0] + straightLen[1];
+        int hopRight = straightLen[0] + jumpLen[1];
+
+        int state1 = isOpenEnd[0] + isOpenEnd[1];
+        int state2 = isJumpOpen[0] + isOpenEnd[1];
+        int state3 = isOpenEnd[0] + isJumpOpen[1];
+
+        int limitLeft = min(5, hopLeft);
+        int limitRight = min(5, hopRight);
+
+        if (applyDefensiveBoost) {
+            int64 val1 = W_DEF[totalConnected][state1];
+            int64 val2 = W_HOP_DEF[limitLeft][state2];
+            int64 val3 = W_HOP_DEF[limitRight][state3];
+            return max({val1, val2, val3});
+        } else {
+            int64 val1 = W_ATK[totalConnected][state1];
+            int64 val2 = W_HOP_ATK[limitLeft][state2];
+            int64 val3 = W_HOP_ATK[limitRight][state3];
+            return max({val1, val2, val3});
+        }
+    }
+};
+
+class AlphaGomokuEngine {
+private:
+    bool isInsideBoard(Point2D pt) {
+        return pt.r >= 0 && pt.r < BOARD_ROWS && pt.c >= 0 && pt.c < BOARD_COLS;
+    }
+
+    Faction getCellFaction(Point2D pt) const {
+        if (pt.r < 0 || pt.r >= BOARD_ROWS || pt.c < 0 || pt.c >= BOARD_COLS) {
+            return OUT_OF_BOUNDS;
+        }
+        return boardMatrix[pt.r][pt.c];
+    }
+
+    bool hasTimedOut() const {
+        auto now = chrono::steady_clock::now();
+        auto diff = chrono::duration_cast<chrono::milliseconds>(now - timestampStart);
+        return diff.count() > 960;
+    }
+
+public:
+    Faction boardMatrix[BOARD_ROWS][BOARD_COLS];
+    SequenceState statusCache[BOARD_ROWS][BOARD_COLS][4][2];
+    int64 evaluateMap[BOARD_ROWS][BOARD_COLS][2];
+    
+    set<CandidateAction> validMoves;
+    chrono::time_point<chrono::steady_clock> timestampStart;
+    bool playingBlack;
+
+    explicit AlphaGomokuEngine(bool iAmBlack) {
+        timestampStart = chrono::steady_clock::now();
+        playingBlack = iAmBlack;
+
+        for (int r = 0; r < BOARD_ROWS; ++r) {
+            for (int c = 0; c < BOARD_COLS; ++c) {
+                boardMatrix[r][c] = EMPTY_CELL;
+                Point2D currentPt(r, c);
+                
+                int dirIdx = 0;
+                while (dirIdx < 4) {
+                    SequenceState& stateMe = statusCache[r][c][dirIdx][0];
+                    SequenceState& stateOp = statusCache[r][c][dirIdx][1];
+                    
+                    stateMe.ownerSide = MYSELF;
+                    stateOp.ownerSide = OPPONENT;
+                    
+                    Point2D backStep = currentPt - DELTA_DIRS[dirIdx];
+                    if (isInsideBoard(backStep)) {
+                        stateMe.isOpenEnd[0] = true;
+                        stateOp.isOpenEnd[0] = true;
+                        stateMe.jumpLen[0] = 1;
+                        stateOp.jumpLen[0] = 1;
+                        Point2D doubleBackStep = currentPt - DELTA_DIRS[dirIdx] * 2;
+                        if (isInsideBoard(doubleBackStep)) {
+                            stateMe.isJumpOpen[0] = true;
+                            stateOp.isJumpOpen[0] = true;
+                        }
                     }
-                    if (inGrid(u + DIR[i])) {
-                        cur[0].blank[1] = cur[1].blank[1] = true;
-                        cur[0].hopLen[1] = cur[1].hopLen[1] = 1;
-                        if (inGrid(u + DIR[i] * 2)) cur[0].hopBlank[1] = cur[1].hopBlank[1] = true;
+                    
+                    Point2D fwdStep = currentPt + DELTA_DIRS[dirIdx];
+                    if (isInsideBoard(fwdStep)) {
+                        stateMe.isOpenEnd[1] = true;
+                        stateOp.isOpenEnd[1] = true;
+                        stateMe.jumpLen[1] = 1;
+                        stateOp.jumpLen[1] = 1;
+                        Point2D doubleFwdStep = currentPt + DELTA_DIRS[dirIdx] * 2;
+                        if (isInsideBoard(doubleFwdStep)) {
+                            stateMe.isJumpOpen[1] = true;
+                            stateOp.isJumpOpen[1] = true;
+                        }
                     }
+                    dirIdx++;
                 }
-                reCalc(u, Self);
-                reCalc(u, Opp);
-                moves.emplace(this, u);
+                updateCellScore(currentPt, MYSELF);
+                updateCellScore(currentPt, OPPONENT);
+                validMoves.emplace(this, currentPt);
             }
         }
     }
 
-    void reCalc(Coor coor, Player player) {
-        ll res = 1;
-        // 如果是黑棋，且当前计算的是对手（白棋）的防守威胁，启用特殊的高压防守权重
-        bool isBlackDefending = (isBlackPlayer && player == Opp);
+    void updateCellScore(Point2D pt, Faction role) {
+        int64 aggregateScore = 1;
+        bool defCondition = (playingBlack && role == OPPONENT);
 
         for (int i = 0; i < 4; ++i) {
-            const ll weight = status[coor.x][coor.y][i][player].weight(isBlackDefending);
-            if (weight == WIN) {
-                res = WIN;
+            int64 lineW = statusCache[pt.r][pt.c][i][role].computeThreat(defCondition);
+            if (lineW == SCORE_INFINITY) {
+                aggregateScore = SCORE_INFINITY;
                 break;
             }
-            res *= weight;
+            aggregateScore *= lineW;
         }
-        calcResult[coor.x][coor.y][player] = res;
+        evaluateMap[pt.r][pt.c][role] = aggregateScore;
     }
 
-    ll calc(Coor coor, Player player) const { return calcResult[coor.x][coor.y][player]; }
+    int64 queryScore(Point2D pt, Faction role) const { 
+        return evaluateMap[pt.r][pt.c][role]; 
+    }
 
-    void modify(Coor u, Player player) {
-        if (u.x == -1) return;
-        if (player == c(u)) return;
+    void commitPlay(Point2D pt, Faction role) {
+        if (pt.r == -1) return;
+        if (role == getCellFaction(pt)) return;
 
-        if (grid[u.x][u.y] == Blank) moves.erase({this, u});
-        grid[u.x][u.y] = player;
+        if (boardMatrix[pt.r][pt.c] == EMPTY_CELL) {
+            validMoves.erase({this, pt});
+        }
+        boardMatrix[pt.r][pt.c] = role;
 
-        static vector<vector<int>> changed(N, vector<int>(M));
-        static int changedTim = 0;
-        ++changedTim;
-        vector<Move> changedList;
+        static vector<vector<int>> modifyTracker(BOARD_ROWS, vector<int>(BOARD_COLS, 0));
+        static int currentStamp = 0;
+        currentStamp += 1;
+        vector<CandidateAction> affectedCells;
 
-        for (int i = 0; i < 4; ++i) {
-            for (int p = 0; p < 2; ++p) {
-                const auto cur = s(u, i)[p];
-                for (int lr = 0; lr <= 1; ++lr) {
-                    const auto d = lr ? DIR[i] : Coor(-DIR[i].x, -DIR[i].y);
-                    const auto forTo = u + (cur.hopLen[lr] + cur.hopBlank[lr] + 1) * d;
-                    for (auto v = u + d; v != forTo; v = v + d) {
-                        if (c(v) == Blank && changed[v.x][v.y] != changedTim) {
-                            changed[v.x][v.y] = changedTim;
-                            changedList.emplace_back(this, v);
+        for (int d = 0; d < 4; ++d) {
+            for (int side = 1; side >= 0; --side) { 
+                SequenceState originState = statusCache[pt.r][pt.c][d][side];
+                
+                for (int isForward = 0; isForward <= 1; ++isForward) {
+                    Point2D traverseDir;
+                    if (isForward == 1) traverseDir = DELTA_DIRS[d];
+                    else traverseDir = Point2D(-DELTA_DIRS[d].r, -DELTA_DIRS[d].c);
+                    
+                    int spanLength = originState.jumpLen[isForward] + originState.isJumpOpen[isForward] + 1;
+                    Point2D boundaryPt = pt + traverseDir * spanLength;
+                    
+                    Point2D cursor = pt + traverseDir;
+                    while (cursor != boundaryPt) {
+                        if (getCellFaction(cursor) == EMPTY_CELL) {
+                            if (modifyTracker[cursor.r][cursor.c] != currentStamp) {
+                                modifyTracker[cursor.r][cursor.c] = currentStamp;
+                                affectedCells.emplace_back(this, cursor);
+                            }
                         }
-                        s(v, i)[p].update(s(v - d, i)[p], c(v - d), lr ^ 1);
+                        Point2D prevCursor = cursor - traverseDir;
+                        int reverseFlag = isForward ^ 1;
+                        statusCache[cursor.r][cursor.c][d][side].mergeForward(
+                            statusCache[prevCursor.r][prevCursor.c][d][side], 
+                            getCellFaction(prevCursor), 
+                            reverseFlag
+                        );
+                        cursor = cursor + traverseDir;
                     }
                 }
             }
         }
 
-        for (const auto &v : changedList) moves.erase(v);
-        for (const auto &v : changedList) {
-            reCalc(v.c, Self);
-            reCalc(v.c, Opp);
-            moves.emplace(this, v.c);
+        for (size_t k = 0; k < affectedCells.size(); k++) {
+            validMoves.erase(affectedCells[k]);
         }
-        if (player == Blank) moves.emplace(this, u);
+        for (size_t k = 0; k < affectedCells.size(); k++) {
+            updateCellScore(affectedCells[k].pt, MYSELF);
+            updateCellScore(affectedCells[k].pt, OPPONENT);
+            validMoves.emplace(this, affectedCells[k].pt);
+        }
+        
+        if (role == EMPTY_CELL) {
+            validMoves.emplace(this, pt);
+        }
     }
 
-    struct Node {
-        int visit = 0;
-        int win = 0;
-        Player player;
-        Player end;
-        Move move1;
-        Move move2;
-        Node *parent;
-        vector<Node *> children;
+    struct SearchTree {
+        int nVisits;
+        int nWins;
+        Faction turnRole;
+        Faction outcome;
+        CandidateAction step1;
+        CandidateAction step2;
+        SearchTree *parentLink;
+        vector<SearchTree *> childNodes;
 
-        Node(Player player, Move move1, Move move2, Node *parent, Player end = Blank)
-            : player(player), end(end), move1(std::move(move1)), move2(std::move(move2)), parent(parent) {}
-
-        void update(Player winner) {
-            visit += 2;
-            if (winner == (player ^ 1))
-                win += 2;
-            else if (winner == Blank)
-                ++win;
+        SearchTree(Faction role, CandidateAction s1, CandidateAction s2, SearchTree *pa, Faction endSt = EMPTY_CELL) 
+            : step1(s1), step2(s2) {
+            nVisits = 0;
+            nWins = 0;
+            turnRole = role;
+            outcome = endSt;
+            parentLink = pa;
         }
 
-        double uct() const { return (double)win / visit + C * sqrt(log(parent->visit) / visit); }
+        void propagateResult(Faction victor) {
+            nVisits += 2;
+            Faction nextTurn = (Faction)(turnRole ^ 1);
+            if (victor == nextTurn) {
+                nWins += 2;
+            } else if (victor == EMPTY_CELL) {
+                nWins += 1;
+            }
+        }
+
+        double calculateUCT() const {
+            double exploitPart = static_cast<double>(nWins) / nVisits;
+            double explorePart = UCT_EXPLORE_CONST * std::sqrt(std::log(parentLink->nVisits) / nVisits);
+            return exploitPart + explorePart;
+        }
     };
 
-    Player mcts(Node *u, int depth = DEPTH) {
-        if (u->visit == 0) {
-            if (u->end == Blank && depth > 0) {
-                const ll minw = min(1000.0, sqrt(moves.begin()->w1));
-                vector<Move> moves1;
-                for (const auto &move : moves) {
-                    if ((int)moves1.size() >= max(2, BREADTH[depth] / 2) &&
-                        (move.w1 < minw || (int)moves1.size() >= BREADTH[depth]))
-                        break;
-                    moves1.emplace_back(move);
-                }
-                set<pair<Coor, Coor>> vis;
-                for (int i = 0; i < (int)moves1.size(); ++i) {
-                    const auto move1 = moves1[i];
-                    if (calc(move1.c, u->player) == WIN) {
-                        u->children = {new Node(Player(u->player ^ 1), move1,
-                                                moves1[i == 0 ? 1 : i - 1], u, u->player)};
-                        break;
-                    }
-                    int cnt = 0;
-                    bool win = false;
-                    modify(move1.c, u->player);
-                    for (const auto &move2 : moves) {
-                        if (!vis.insert({min(move1.c, move2.c), max(move1.c, move2.c)}).second)
-                            continue;
-                        if (++cnt > (BREADTH[depth] - i) / 2 + 1) break;
-                        if (calc(move2.c, u->player) == WIN) {
-                            win = true;
-                            u->children = {new Node(Player(u->player ^ 1), move1, move2, u, u->player)};
+    Faction executeMCTS(SearchTree *nodePtr, int depthLeft = MAX_SEARCH_DEPTH) {
+        if (nodePtr->nVisits == 0) {
+            if (nodePtr->outcome == EMPTY_CELL && depthLeft > 0) {
+                
+                int64 minThreshold = std::min(1000.0, std::sqrt(validMoves.begin()->priorityScore));
+                vector<CandidateAction> topCandidates;
+                
+                for (auto it = validMoves.begin(); it != validMoves.end(); ++it) {
+                    int currentSize = topCandidates.size();
+                    int widthTarget = std::max(2, WIDTH_LIMITS[depthLeft] / 2);
+                    if (currentSize >= widthTarget) {
+                        if (it->priorityScore < minThreshold || currentSize >= WIDTH_LIMITS[depthLeft]) {
                             break;
                         }
-                        u->children.push_back(new Node(Player(u->player ^ 1), move1, move2, u));
                     }
-                    modify(move1.c, Blank);
-                    if (win) break;
+                    topCandidates.push_back(*it);
+                }
+                
+                set<pair<Point2D, Point2D>> combinationSet;
+                for (int idx = 0; idx < (int)topCandidates.size(); ++idx) {
+                    CandidateAction actA = topCandidates[idx];
+                    
+                    if (queryScore(actA.pt, nodePtr->turnRole) == SCORE_INFINITY) {
+                        CandidateAction partner = topCandidates[idx == 0 ? 1 : idx - 1];
+                        Faction nextRole = (Faction)(nodePtr->turnRole ^ 1);
+                        nodePtr->childNodes = { new SearchTree(nextRole, actA, partner, nodePtr, nodePtr->turnRole) };
+                        break;
+                    }
+                    
+                    int loopCounter = 0;
+                    bool immediateWin = false;
+                    commitPlay(actA.pt, nodePtr->turnRole);
+                    
+                    for (auto actB : validMoves) {
+                        Point2D pMin = min(actA.pt, actB.pt);
+                        Point2D pMax = max(actA.pt, actB.pt);
+                        if (!combinationSet.insert({pMin, pMax}).second) continue;
+                        
+                        loopCounter++;
+                        int pruneThreshold = (WIDTH_LIMITS[depthLeft] - idx) / 2 + 1;
+                        if (loopCounter > pruneThreshold) break;
+                        
+                        Faction nextRole = (Faction)(nodePtr->turnRole ^ 1);
+                        if (queryScore(actB.pt, nodePtr->turnRole) == SCORE_INFINITY) {
+                            immediateWin = true;
+                            nodePtr->childNodes = { new SearchTree(nextRole, actA, actB, nodePtr, nodePtr->turnRole) };
+                            break;
+                        }
+                        nodePtr->childNodes.push_back(new SearchTree(nextRole, actA, actB, nodePtr));
+                    }
+                    commitPlay(actA.pt, EMPTY_CELL);
+                    if (immediateWin) break;
                 }
             }
         }
 
-        if (u->children.empty()) {
-            u->update(u->end);
-            return u->end;
+        if (nodePtr->childNodes.empty()) {
+            nodePtr->propagateResult(nodePtr->outcome);
+            return nodePtr->outcome;
         }
 
-        double mx = -1;
-        Node *choose = nullptr;
-        for (auto v : u->children) {
-            if (v->visit == 0) {
-                choose = v;
+        double highestUCT = -1.0;
+        SearchTree *chosenChild = nullptr;
+        
+        for (size_t i = 0; i < nodePtr->childNodes.size(); i++) {
+            SearchTree *cv = nodePtr->childNodes[i];
+            if (cv->nVisits == 0) {
+                chosenChild = cv;
                 break;
             }
-            if (v->uct() > mx) {
-                mx = v->uct();
-                choose = v;
+            double curUCT = cv->calculateUCT();
+            if (curUCT > highestUCT) {
+                highestUCT = curUCT;
+                chosenChild = cv;
             }
         }
 
-        modify(choose->move1.c, u->player);
-        modify(choose->move2.c, u->player);
-        const auto res = mcts(choose, depth - 1);
-        modify(choose->move2.c, Blank);
-        modify(choose->move1.c, Blank);
-        u->update(res);
-        return res;
+        commitPlay(chosenChild->step1.pt, nodePtr->turnRole);
+        commitPlay(chosenChild->step2.pt, nodePtr->turnRole);
+        
+        Faction simResult = executeMCTS(chosenChild, depthLeft - 1);
+        
+        commitPlay(chosenChild->step2.pt, EMPTY_CELL);
+        commitPlay(chosenChild->step1.pt, EMPTY_CELL);
+        
+        nodePtr->propagateResult(simResult);
+        return simResult;
     }
 
-    Json::Value mcts() {
-        auto *root = new Node(Self, {{-1, -1}, 0}, {{-1, -1}, 0}, nullptr);
+    Json::Value beginSearch() {
+        SearchTree *rootNode = new SearchTree(MYSELF, CandidateAction(Point2D(-1, -1), 0), CandidateAction(Point2D(-1, -1), 0), nullptr);
 
-        while (!timeout()) mcts(root);
+        do {
+            executeMCTS(rootNode);
+        } while (!hasTimedOut());
 
-        const auto best = *max_element(root->children.begin(), root->children.end(), [](Node *lhs, Node *rhs) {
-            return lhs->visit < rhs->visit;
-        });
-
-        ostringstream debug;
-        for (auto v : root->children) {
-            debug << v->move1.c.x << ',' << v->move1.c.y << ' ' << v->move1.w1 << ' ';
-            debug << v->move2.c.x << ',' << v->move2.c.y << ' ' << v->move2.w1 << ' ';
-            debug << v->win << '/' << v->visit - v->win << "    ";
+        SearchTree *optimalNode = rootNode->childNodes[0];
+        for (size_t i = 1; i < rootNode->childNodes.size(); ++i) {
+            if (rootNode->childNodes[i]->nVisits > optimalNode->nVisits) {
+                optimalNode = rootNode->childNodes[i];
+            }
         }
 
-        Json::Value output;
-        output["response"]["x0"] = best->move1.c.x;
-        output["response"]["y0"] = best->move1.c.y;
-        output["response"]["x1"] = best->move2.c.x;
-        output["response"]["y1"] = best->move2.c.y;
-        output["debug"] = debug.str();
+        ostringstream debugTracker;
+        for (size_t i = 0; i < rootNode->childNodes.size(); ++i) {
+            SearchTree *cv = rootNode->childNodes[i];
+            debugTracker << cv->step1.pt.r << ',' << cv->step1.pt.c << ' ' << cv->step1.priorityScore << ' ';
+            debugTracker << cv->step2.pt.r << ',' << cv->step2.pt.c << ' ' << cv->step2.priorityScore << ' ';
+            debugTracker << cv->nWins << '/' << cv->nVisits - cv->nWins << "    ";
+        }
 
-        return output;
+        Json::Value responseJson;
+        responseJson["response"]["x0"] = optimalNode->step1.pt.r;
+        responseJson["response"]["y0"] = optimalNode->step1.pt.c;
+        responseJson["response"]["x1"] = optimalNode->step2.pt.r;
+        responseJson["response"]["y1"] = optimalNode->step2.pt.c;
+        responseJson["debug"] = debugTracker.str();
+
+        return responseJson;
     }
 
-    // =========================================================
-    // 开局定式：黑棋只下天元，第二步绝对不死板，交给加强后的 MCTS 防守
-    // =========================================================
-    bool use_opening_book(int turnID, Json::Value& output) {
-        if (turnID == 1 && isBlackPlayer) {
-            output["response"]["x0"] = N / 2;
-            output["response"]["y0"] = M / 2;
-            output["response"]["x1"] = -1;
-            output["response"]["y1"] = -1;
+    bool handleOpening(int turnCounter, Json::Value& outJson) {
+        if (turnCounter == 1 && playingBlack) {
+            outJson["response"]["x0"] = BOARD_ROWS / 2;
+            outJson["response"]["y0"] = BOARD_COLS / 2;
+            outJson["response"]["x1"] = -1;
+            outJson["response"]["y1"] = -1;
             return true;
         }
         return false;
     }
 };
 
-const ConnectSix::Coor ConnectSix::DIR[4] = {{0, 1}, {1, 0}, {1, 1}, {1, -1}};
+CandidateAction::CandidateAction(AlphaGomokuEngine *enginePtr, Point2D pos) {
+    pt = pos;
+    int dr = abs(pos.r - BOARD_ROWS / 2) + 1;
+    int dc = abs(pos.c - BOARD_COLS / 2) + 1;
+    centerDistance = dr * dc;
+
+    int64 scoreMe = enginePtr->queryScore(pos, MYSELF);
+    int64 scoreOp = enginePtr->queryScore(pos, OPPONENT);
+    
+    if (enginePtr->playingBlack) {
+        if (scoreMe >= SCORE_INFINITY / 100) {
+            priorityScore = scoreMe * 2;
+        } else if (scoreOp >= SCORE_INFINITY / 100) {
+            priorityScore = scoreOp * 2;
+        } else {
+            priorityScore = max(scoreMe, scoreOp * 2); 
+        }
+    } else {
+        priorityScore = max(scoreMe, scoreOp);
+    }
+}
 
 int main() {
-    string str;
-    getline(cin, str);
-    Json::Value input;
-    Json::Reader().parse(str, input);
+    string jsonString;
+    getline(cin, jsonString);
+    Json::Value parsedPayload;
+    Json::Reader().parse(jsonString, parsedPayload);
     
-    const int turnID = input["requests"].size();
-    const bool isBlack = input["requests"][0u]["x0"].asInt() == -1;
+    int turnAmount = parsedPayload["requests"].size();
+    bool checkBlack = parsedPayload["requests"][0u]["x0"].asInt() == -1;
     
-    // 初始化时注入身份，保证白棋逻辑完全不被污染
-    ConnectSix game(isBlack); 
+    AlphaGomokuEngine core(checkBlack); 
     
-    for (int i = 0; i < turnID; i++) {
-        game.modify({input["requests"][i]["x0"].asInt(), input["requests"][i]["y0"].asInt()}, ConnectSix::Opp);
-        game.modify({input["requests"][i]["x1"].asInt(), input["requests"][i]["y1"].asInt()}, ConnectSix::Opp);
-        if (i == turnID - 1) break;
-        game.modify({input["responses"][i]["x0"].asInt(), input["responses"][i]["y0"].asInt()}, ConnectSix::Self);
-        game.modify({input["responses"][i]["x1"].asInt(), input["responses"][i]["y1"].asInt()}, ConnectSix::Self);
+    for (int k = 0; k < turnAmount; k++) {
+        int reqX0 = parsedPayload["requests"][k]["x0"].asInt();
+        int reqY0 = parsedPayload["requests"][k]["y0"].asInt();
+        int reqX1 = parsedPayload["requests"][k]["x1"].asInt();
+        int reqY1 = parsedPayload["requests"][k]["y1"].asInt();
+
+        core.commitPlay(Point2D(reqX0, reqY0), OPPONENT);
+        core.commitPlay(Point2D(reqX1, reqY1), OPPONENT);
+        
+        if (k == turnAmount - 1) break;
+        
+        int resX0 = parsedPayload["responses"][k]["x0"].asInt();
+        int resY0 = parsedPayload["responses"][k]["y0"].asInt();
+        int resX1 = parsedPayload["responses"][k]["x1"].asInt();
+        int resY1 = parsedPayload["responses"][k]["y1"].asInt();
+
+        core.commitPlay(Point2D(resX0, resY0), MYSELF);
+        core.commitPlay(Point2D(resX1, resY1), MYSELF);
     }
 
-    Json::Value output;
+    Json::Value finalAction;
 
-    if (!game.use_opening_book(turnID, output)) {
-        output = game.mcts();
+    if (!core.handleOpening(turnAmount, finalAction)) {
+        finalAction = core.beginSearch();
     }
 
-    cout << Json::FastWriter().write(output) << endl;
+    cout << Json::FastWriter().write(finalAction) << endl;
 
     return 0;
 }
